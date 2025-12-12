@@ -1,0 +1,23 @@
+[project]
+name = "network-hunt"
+version = "1.0.0"
+description = "Discover and track talented makers from Product Hunt"
+requires-python = ">=3.10"
+dependencies = [
+    "supabase>=2.0.0",
+    "httpx>=0.25.0",
+    "python-dotenv>=1.0.0",
+    "click>=8.1.0",
+    "gql[httpx]>=3.5.0",
+    "pydantic>=2.5.0",
+]
+
+[project.scripts]
+network-hunt = "network_hunt.cli:cli"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
