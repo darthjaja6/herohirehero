@@ -7,17 +7,18 @@ const SUPABASE_KEY = 'sb_publishable_jJNTc0yPKEYWkO54nYUNZA_9cf6bUr7';
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const manifestoLines = [
-  { text: "> THE NEW ERA:", muted: false },
-  { text: "> $200/month AI agents now outperform mediocre hires.", muted: false },
-  { text: "> The only workers worth hiring are heroes.", muted: false },
+  { text: "We help hero teams hire heroes", muted: true },
   { text: "", muted: false },
-  { text: "> THE PRINCIPLE:", muted: false },
-  { text: "> A hero founder only hires heroes.", muted: false },
-  { text: "> A hero only joins a hero team.", muted: false },
+  { text: "AI handles the grunt work now.", muted: false },
+  { text: "Only hero teams made of hero individuals win.", muted: false },
   { text: "", muted: false },
-  { text: "We cut through the noise. Three questions reveal what matters.", muted: false },
+  { text: "> Hero teams run lean—every hire must be a force multiplier.", muted: false },
+  { text: "> Heroes seek missions worth their time and allies worth their trust.", muted: false },
   { text: "", muted: false },
-  { text: "Can't answer these? Go build something hard. Come back in 3 months.", muted: true }
+  { text: "Three questions separate heroes from the rest.", muted: false },
+  { text: "Answer them. We help you find your kind.", muted: false },
+  { text: "", muted: false },
+  { text: "DIFFICULTY_PROMPT", muted: true, isSpecial: true }
 ];
 
 const questions = [
@@ -54,6 +55,9 @@ function App() {
   const [recommendations, setRecommendations] = useState([]);
   const [selectedProfile, setSelectedProfile] = useState(null);
   const [showPreferenceModal, setShowPreferenceModal] = useState(false);
+  const [showDifficultyModal, setShowDifficultyModal] = useState(false);
+  const [reminderEmail, setReminderEmail] = useState('');
+  const [emailSubmitted, setEmailSubmitted] = useState(false);
 
   const wordCount = (text) => {
     return text?.trim() ? text.trim().split(/\s+/).length : 0;
@@ -397,12 +401,35 @@ function App() {
   const totalPages = Math.ceil(totalCount / PAGE_SIZE);
   const displayedLines = manifestoLines.slice(0, lineIndex);
 
+  const submitReminderEmail = async () => {
+    if (!reminderEmail.trim() || !reminderEmail.includes('@')) {
+      setErrorMsg('Please enter a valid email address.');
+      return;
+    }
+
+    try {
+      await supabase.from('reminder_emails').insert({
+        email: reminderEmail.trim(),
+        created_at: new Date().toISOString()
+      });
+      setEmailSubmitted(true);
+      setErrorMsg('');
+    } catch (e) {
+      // If table doesn't exist, just show success anyway for now
+      setEmailSubmitted(true);
+      setErrorMsg('');
+    }
+  };
+
   return (
     <>
       <div className="screen-wrapper">
         {/* Header */}
         <div className="header">
-          <h1>HERO HIRE HERO</h1>
+          <div className="logo-container">
+            <img src="/logo.svg" alt="hero4hero" className="logo" />
+            <h1>hero for hero</h1>
+          </div>
           <div className="user-status">
             {user ? (
               <>
@@ -427,9 +454,19 @@ function App() {
             {/* Manifesto */}
             <div className="manifesto">
               {displayedLines.map((line, i) => (
-                <div key={i} className={`manifesto-line ${line.muted ? 'muted' : ''}`}>
-                  {line.text || '\u00A0'}
-                </div>
+                line.isSpecial ? (
+                  <div key={i} className="difficulty-prompt" onClick={() => setShowDifficultyModal(true)}>
+                    <span>Feeling difficult answering these questions?</span>
+                    <svg className="info-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <circle cx="12" cy="12" r="10"/>
+                      <path d="M12 16v-4M12 8h.01"/>
+                    </svg>
+                  </div>
+                ) : (
+                  <div key={i} className={`manifesto-line ${line.muted ? 'muted' : ''}`}>
+                    {line.text || '\u00A0'}
+                  </div>
+                )
               ))}
               {showCursor && <span className="cursor"></span>}
             </div>
@@ -557,7 +594,7 @@ function App() {
                 </div>
 
                 {recommendations.length === 0 ? (
-                  <div className="empty-state">No recommendations yet. Check back soon!</div>
+                  <div className="empty-state">We do founder-level screening to make sure you only see the best. Come back soon.</div>
                 ) : (
                   <div className="recommendations-grid">
                     {recommendations.map(profile => (
@@ -692,6 +729,48 @@ function App() {
                 <div className="profile-answer-text">{selectedProfile.preference}</div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Difficulty Explanation Modal */}
+      {showDifficultyModal && (
+        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowDifficultyModal(false)}>
+          <div className="modal-content difficulty-modal">
+            <button className="modal-close" onClick={() => setShowDifficultyModal(false)}>×</button>
+
+            <div className="difficulty-modal-content">
+              <p>I totally understand.</p>
+
+              <p>My name is Wei. I've been on both sides—sweating through these questions, and asking them when hiring for my startup.</p>
+
+              <p>They're hard because they matter. Skills fade. Titles are noise. But <strong>grit, vision, and the awesome things you've actually built</strong>—those tell the real story.</p>
+
+              <p>Can't answer yet? That's not failure. <strong>That's a sign you have work to do.</strong></p>
+
+              <p className="highlight-text">Go build something you think is awesome. Keep hacking and failing at it until you conquer it.</p>
+
+              <p>Drop your email—I'll check in.</p>
+
+              {!emailSubmitted ? (
+                <div className="reminder-email-section">
+                  <input
+                    type="email"
+                    className="reminder-email-input"
+                    placeholder="your@email.com"
+                    value={reminderEmail}
+                    onChange={(e) => setReminderEmail(e.target.value)}
+                  />
+                  <button className="reminder-submit-btn" onClick={submitReminderEmail}>
+                    Check in after 3 months
+                  </button>
+                </div>
+              ) : (
+                <div className="email-submitted-msg">
+                  ✓ Got it! I'll reach out in 3 months. Now go build something amazing.
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}

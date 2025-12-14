@@ -31,8 +31,21 @@ body {
 .header {
     display: flex;
     justify-content: space-between;
-    align-items: flex-start;
+    align-items: center;
     margin-bottom: 2rem;
+}
+
+.logo-container {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    border-bottom: 4px solid var(--terminal-green);
+    padding-bottom: 1rem;
+}
+
+.logo {
+    width: 48px;
+    height: 48px;
 }
 
 h1 {
@@ -41,13 +54,11 @@ h1 {
     font-size: 2.5rem;
     margin: 0;
     color: var(--text-white);
-    border-bottom: 4px solid var(--terminal-green);
-    padding-bottom: 1rem;
 }
 
 .user-status {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 1rem;
     font-size: 0.8rem;
     color: #666;
@@ -790,4 +801,132 @@ h1 {
     margin-top: 2rem;
     padding-top: 1.5rem;
     border-top: 1px solid var(--tactical-gray);
+}
+
+/* Difficulty Prompt */
+.difficulty-prompt {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--muted);
+    font-size: 0.95rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    padding: 0.25rem 0;
+}
+
+.difficulty-prompt:hover {
+    color: var(--terminal-green);
+}
+
+.difficulty-prompt .info-icon {
+    width: 18px;
+    height: 18px;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+}
+
+.difficulty-prompt:hover .info-icon {
+    opacity: 1;
+}
+
+/* Difficulty Modal */
+.difficulty-modal {
+    max-width: 600px;
+    max-height: 85vh;
+    overflow-y: auto;
+}
+
+.difficulty-modal-content {
+    padding: 1rem 0;
+}
+
+.difficulty-modal-content p {
+    color: var(--text-white);
+    line-height: 1.8;
+    margin-bottom: 1.25rem;
+    font-size: 0.95rem;
+}
+
+.difficulty-modal-content p:first-child {
+    color: var(--terminal-green);
+    font-size: 1.1rem;
+    margin-bottom: 1.5rem;
+}
+
+.difficulty-modal-content strong {
+    color: var(--terminal-green);
+}
+
+.difficulty-modal-content .highlight-text {
+    background: rgba(0, 255, 65, 0.1);
+    border-left: 3px solid var(--terminal-green);
+    padding: 1rem 1.25rem;
+    margin: 1.5rem 0;
+    font-style: italic;
+}
+
+.reminder-email-section {
+    display: flex;
+    gap: 1rem;
+    margin-top: 1.5rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--tactical-gray);
+}
+
+.reminder-email-input {
+    flex: 1;
+    background: var(--deep-space);
+    border: 1px solid var(--tactical-gray);
+    color: var(--text-white);
+    font-family: var(--font-mono);
+    font-size: 0.95rem;
+    padding: 0.75rem 1rem;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+.reminder-email-input:focus {
+    border-color: var(--terminal-green);
+}
+
+.reminder-email-input::placeholder {
+    color: var(--muted);
+}
+
+.reminder-submit-btn {
+    background: transparent;
+    border: 1px solid var(--terminal-green);
+    color: var(--terminal-green);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    padding: 0.75rem 1.5rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.reminder-submit-btn:hover {
+    background: var(--terminal-green);
+    color: var(--deep-space);
+}
+
+.email-submitted-msg {
+    background: rgba(0, 255, 65, 0.1);
+    border: 1px solid var(--terminal-green);
+    color: var(--terminal-green);
+    padding: 1rem 1.25rem;
+    margin-top: 1.5rem;
+    text-align: center;
+    font-size: 0.95rem;
+}
+
+@media (max-width: 600px) {
+    .reminder-email-section {
+        flex-direction: column;
+    }
+
+    .reminder-submit-btn {
+        width: 100%;
+    }
 }
