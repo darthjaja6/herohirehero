@@ -4,13 +4,7 @@
 import click
 
 from .db import supabase
-from .db.local import (
-    get_posts_count, get_top_posts, get_post,
-    get_person_posts_count, get_person_total_votes,
-    get_knowledge_count, get_queue_stats,
-)
-from .crawlers import crawl_producthunt
-from .enrichers import enrich_person, process_queue, queue_top_persons
+from .workers import APIWorker, PostScraperWorker, ProfileScraperWorker
 
 
 @click.group()
@@ -19,168 +13,173 @@ def cli():
     pass
 
 
-@cli.command()
+# ========== Crawl Commands ==========
+
+@cli.group()
+def crawl():
+    """Crawl Product Hunt data."""
+    pass
+
+
+@crawl.command("api")
 @click.option("-m", "--mode", type=click.Choice(["backfill", "incremental"]), default="incremental")
 @click.option("-d", "--days", type=int, default=7, help="Days to crawl back (backfill mode)")
-@click.option("--max-posts", type=int, default=None, help="Maximum posts to crawl")
-def crawl(mode: str, days: int, max_posts: int | None):
-    """Crawl Product Hunt for posts and makers."""
-    click.echo(f"Starting {mode} crawl...")
-    crawl_producthunt(mode, days=days, max_posts=max_posts)  # type: ignore
-    click.echo("Crawl completed!")
-
-
-@cli.command()
-@click.option("-p", "--person-id", default=None, help="Specific person ID to enrich")
-@click.option("-t", "--task", type=click.Choice(["twitter", "linkedin", "github", "arxiv", "general", "full"]), default="full")
-@click.option("-i", "--incremental", is_flag=True, help="Only fetch new data since last enrichment")
-@click.option("--min-score", type=int, default=0, help="Minimum importance score for batch enrichment")
-@click.option("-l", "--limit", type=int, default=10, help="Maximum persons to enrich")
-def enrich(person_id: str | None, task: str, incremental: bool, min_score: int, limit: int):
-    """Enrich person data from various sources."""
-    if person_id:
-        click.echo(f"Enriching person {person_id}...")
-        result = enrich_person(person_id, [task], incremental)  # type: ignore
-        click.echo(f"Result: {result}")
+@click.option("--schedule-only", is_flag=True, help="Only schedule tasks, don't run")
+@click.option("-l", "--limit", type=int, default=100, help="Maximum tasks to process")
+def crawl_api(mode: str, days: int, schedule_only: bool, limit: int):
+    """Crawl Product Hunt API for posts."""
+    if mode == "backfill":
+        APIWorker.schedule_backfill(days)
     else:
-        click.echo(f"Queuing top persons (min score: {min_score}, limit: {limit})...")
-        queued = queue_top_persons(min_score, limit)
-        click.echo(f"Queued {queued} persons")
-        click.echo("Processing queue...")
-        process_queue(limit)
+        APIWorker.schedule_incremental()
+
+    if not schedule_only:
+        APIWorker().run(limit)
 
 
-@cli.command()
-@click.option("--process", is_flag=True, help="Process pending tasks")
-@click.option("-l", "--limit", type=int, default=10, help="Maximum tasks to process")
-@click.option("--status", "show_status", is_flag=True, help="Show queue status")
-def queue(process: bool, limit: int, show_status: bool):
-    """Manage the enrichment queue."""
-    if show_status:
-        # Use local SQLite queue stats
-        stats = get_queue_stats()
-        click.echo("Queue Status (local SQLite):")
-        click.echo(f"  Pending:    {stats.get('pending', 0)}")
-        click.echo(f"  Processing: {stats.get('processing', 0)}")
-        click.echo(f"  Completed:  {stats.get('completed', 0)}")
-        click.echo(f"  Failed:     {stats.get('failed', 0)}")
+@crawl.command("posts")
+@click.option("-l", "--limit", type=int, default=100, help="Maximum tasks to process")
+def crawl_posts(limit: int):
+    """Scrape post pages for makers."""
+    PostScraperWorker().run(limit)
 
-    if process:
-        click.echo(f"Processing up to {limit} tasks...")
-        process_queue(limit)
 
+@crawl.command("profiles")
+@click.option("-l", "--limit", type=int, default=100, help="Maximum tasks to process")
+def crawl_profiles(limit: int):
+    """Scrape user profiles."""
+    ProfileScraperWorker().run(limit)
+
+
+@crawl.command("all")
+@click.option("-m", "--mode", type=click.Choice(["backfill", "incremental"]), default="incremental")
+@click.option("-d", "--days", type=int, default=7, help="Days to crawl back (backfill mode)")
+@click.option("-l", "--limit", type=int, default=100, help="Maximum tasks per stage")
+def crawl_all(mode: str, days: int, limit: int):
+    """Run all crawl stages in sequence."""
+    click.echo("=== Stage 1: API ===")
+    if mode == "backfill":
+        APIWorker.schedule_backfill(days)
+    else:
+        APIWorker.schedule_incremental()
+    APIWorker().run(limit)
+
+    click.echo("\n=== Stage 2: Post Scraping ===")
+    PostScraperWorker().run(limit)
+
+    click.echo("\n=== Stage 3: Profile Scraping ===")
+    ProfileScraperWorker().run(limit)
+
+    click.echo("\nAll stages completed!")
+
+
+# ========== Task Commands ==========
+
+@cli.command("tasks")
+@click.option("--retry-failed", is_flag=True, help="Reset failed tasks to pending")
+@click.option("--cleanup", is_flag=True, help="Reset stale processing tasks")
+def tasks(retry_failed: bool, cleanup: bool):
+    """Show task queue status."""
+    if retry_failed:
+        result = supabase.table("ph_tasks").update({
+            "status": "pending",
+            "error": None
+        }).eq("status", "failed").execute()
+        click.echo(f"Reset {len(result.data or [])} failed tasks to pending")
+        return
+
+    if cleanup:
+        for worker_cls in [APIWorker, PostScraperWorker, ProfileScraperWorker]:
+            worker_cls().cleanup_stale_tasks()
+        return
+
+    click.echo("\nTask Queue Status\n")
+
+    for worker_cls in [APIWorker, PostScraperWorker, ProfileScraperWorker]:
+        stats = worker_cls.get_stats()
+        total = sum(stats.values())
+        click.echo(f"  {worker_cls.task_type}:")
+        click.echo(f"    {stats['pending']:4d} pending, {stats['completed']:4d} completed, {stats['failed']:4d} failed")
+
+
+# ========== Stats Command ==========
 
 @cli.command()
 def stats():
     """Show database statistics."""
-    # Local SQLite
-    posts_count = get_posts_count()
-    knowledge_count = get_knowledge_count()
+    # Supabase counts
+    posts = supabase.table("ph_posts").select("id", count="exact").execute()
+    post_people = supabase.table("ph_post_people").select("id", count="exact").execute()
+    profiles = supabase.table("ph_profiles").select("username", count="exact").execute()
 
-    # Supabase
-    persons = supabase.table("persons").select("id", count="exact").execute()
+    click.echo("\nDatabase Statistics (Supabase)\n")
+    click.echo(f"  Posts:          {posts.count or 0}")
+    click.echo(f"  Post People:    {post_people.count or 0}")
+    click.echo(f"  Profiles:       {profiles.count or 0}")
 
-    click.echo("\nDatabase Statistics\n")
-    click.echo("Supabase:")
-    click.echo(f"  Persons:        {persons.count or 0}")
-    click.echo("\nLocal SQLite:")
-    click.echo(f"  Posts:          {posts_count}")
-    click.echo(f"  Knowledge:      {knowledge_count}")
+    # Task stats
+    click.echo("\nTask Queue:\n")
+    for worker_cls in [APIWorker, PostScraperWorker, ProfileScraperWorker]:
+        stats = worker_cls.get_stats()
+        click.echo(f"  {worker_cls.task_type}:")
+        click.echo(f"    {stats['pending']:4d} pending, {stats['completed']:4d} completed, {stats['failed']:4d} failed")
 
-    # Queue stats
-    queue_stats = get_queue_stats()
-    click.echo(f"\nQueue: {queue_stats.get('pending', 0)} pending, {queue_stats.get('completed', 0)} completed")
+    # Top posts
+    top_posts = supabase.table("ph_posts").select(
+        "name, votes_count"
+    ).order("votes_count", desc=True).limit(5).execute()
 
-    # Top posts from local DB
-    top_posts = get_top_posts(5)
-    if top_posts:
-        click.echo("\nTop Posts by Votes (local):\n")
-        for p in top_posts:
+    if top_posts.data:
+        click.echo("\nTop Posts by Votes:\n")
+        for p in top_posts.data:
             click.echo(f"  {p['votes_count']:4d} - {p['name']}")
 
-    # Top persons from Supabase
-    top = supabase.table("persons").select(
-        "name, importance_score, twitter, github"
-    ).order("importance_score", desc=True).limit(10).execute()
+    # Top profiles
+    top_profiles = supabase.table("ph_profiles").select(
+        "username, name, followers_count, links"
+    ).order("followers_count", desc=True).limit(5).execute()
 
-    if top.data:
-        click.echo("\nTop Persons by Importance Score:\n")
-        for p in top.data:
-            socials = []
-            if p.get("twitter"):
-                socials.append(f"@{p['twitter']}")
-            if p.get("github"):
-                socials.append(f"gh:{p['github']}")
-            social_str = f" ({', '.join(socials)})" if socials else ""
-            click.echo(f"  {p['importance_score']:4d} - {p['name']}{social_str}")
+    if top_profiles.data:
+        click.echo("\nTop Profiles by Followers:\n")
+        for p in top_profiles.data:
+            links = p.get("links") or []
+            link_count = len(links)
+            link_str = f" [{link_count} links]" if link_count else ""
+            click.echo(f"  {p['followers_count']:5d} - @{p['username']} ({p['name']}){link_str}")
 
 
-@cli.command()
-@click.option("-l", "--limit", type=int, default=20, help="Number of persons to show")
-@click.option("--with-email", is_flag=True, help="Only show persons with email")
-@click.option("--with-twitter", is_flag=True, help="Only show persons with Twitter")
-@click.option("--min-score", type=int, default=0, help="Minimum importance score")
-def persons(limit: int, with_email: bool, with_twitter: bool, min_score: int):
-    """List persons in database."""
-    query = supabase.table("persons").select(
-        "id, name, headline, twitter, github, email, importance_score"
-    ).order("importance_score", desc=True).limit(limit)
+# ========== Reset Command ==========
 
-    if with_email:
-        query = query.not_.is_("email", "null")
-    if with_twitter:
-        query = query.not_.is_("twitter", "null")
-    if min_score > 0:
-        query = query.gte("importance_score", min_score)
+@cli.command("reset")
+@click.option("--confirm", is_flag=True, help="Confirm reset")
+@click.option("--tasks-only", is_flag=True, help="Only reset tasks, keep data")
+def reset(confirm: bool, tasks_only: bool):
+    """Reset all crawl progress and data."""
+    if not confirm:
+        if tasks_only:
+            click.echo("This will delete all tasks from ph_tasks.")
+        else:
+            click.echo("This will delete all ph_posts, ph_post_people, ph_profiles, and ph_tasks.")
+        click.echo("Run with --confirm to proceed.")
+        return
 
-    result = query.execute()
+    click.echo("Resetting...")
 
-    click.echo("\nPersons\n")
-    for p in result.data or []:
-        click.echo(f"[{p['importance_score']}] {p['name']}")
-        if p.get("headline"):
-            click.echo(f"    {p['headline']}")
+    # Always clear tasks
+    supabase.table("ph_tasks").delete().neq("task_type", "").execute()
+    click.echo("  Cleared ph_tasks")
 
-        contacts = []
-        if p.get("twitter"):
-            contacts.append(f"Twitter: @{p['twitter']}")
-        if p.get("github"):
-            contacts.append(f"GitHub: {p['github']}")
-        if p.get("email"):
-            contacts.append(f"Email: {p['email']}")
+    if not tasks_only:
+        supabase.table("ph_profiles").delete().neq("username", "").execute()
+        click.echo("  Cleared ph_profiles")
 
-        if contacts:
-            click.echo(f"    {' | '.join(contacts)}")
-        click.echo(f"    ID: {p['id']}")
-        click.echo("")
+        supabase.table("ph_post_people").delete().neq("username", "").execute()
+        click.echo("  Cleared ph_post_people")
 
+        supabase.table("ph_posts").delete().neq("id", "").execute()
+        click.echo("  Cleared ph_posts")
 
-@cli.command("update-scores")
-def update_scores():
-    """Recalculate importance scores for all persons."""
-    click.echo("Updating importance scores...")
-
-    persons_result = supabase.table("persons").select("id, twitter, github").execute()
-
-    updated = 0
-    for person in persons_result.data or []:
-        person_id = person["id"]
-
-        # Get maker posts count and total votes from local SQLite
-        post_count = get_person_posts_count(person_id)
-        total_votes = get_person_total_votes(person_id)
-
-        score = (
-            post_count * 10 +
-            total_votes // 10 +
-            (5 if person.get("twitter") else 0) +
-            (5 if person.get("github") else 0)
-        )
-
-        supabase.table("persons").update({"importance_score": score}).eq("id", person_id).execute()
-        updated += 1
-
-    click.echo(f"Updated scores for {updated} persons")
+    click.echo("\nReset complete!")
 
 
 if __name__ == "__main__":

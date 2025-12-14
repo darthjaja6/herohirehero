@@ -9,23 +9,25 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const manifestoLines = [
   { text: "We help hero teams hire heroes", muted: true },
   { text: "", muted: false },
-  { text: "AI handles the grunt work now.", muted: false },
-  { text: "Only hero teams made of hero individuals win.", muted: false },
-  { text: "", muted: false },
-  { text: "> Hero teams run lean—every hire must be a force multiplier.", muted: false },
-  { text: "> Heroes seek missions worth their time and allies worth their trust.", muted: false },
-  { text: "", muted: false },
-  { text: "Three questions separate heroes from the rest.", muted: false },
-  { text: "Answer them. We help you find your kind.", muted: false },
-  { text: "", muted: false },
-  { text: "DIFFICULTY_PROMPT", muted: true, isSpecial: true }
+  { text: "3 sharp questions separate heroes from the rest.", muted: false },
+  { text: "Answer them. Get matched.", muted: false },
 ];
 
-const questions = [
-  { key: 'grit', label: 'GRIT', question: 'Tell me about the hardest challenge you conquered.' },
-  { key: 'badass', label: 'PEAK', question: "What accomplishment are you most proud of?" },
-  { key: 'vision', label: 'VISION', question: "What's the future you strive to build for the next 5 years?" }
-];
+const questionsByRole = {
+  joining: [
+    { key: 'grit', label: 'GRIT', question: 'Tell me about the hardest challenge you conquered.' },
+    { key: 'badass', label: 'PEAK', question: "What accomplishment are you most proud of?" },
+    { key: 'vision', label: 'VISION', question: "What's the future you strive to build for the next 5 years?" },
+  ],
+  hiring: [
+    { key: 'grit', label: 'GRIT', question: "What's the hardest challenge your team conquered?" },
+    { key: 'badass', label: 'PEAK', question: "What's your proudest accomplishment before this venture?" },
+    { key: 'vision', label: 'VISION', question: "What's the future your team is building for the next 5 years?" },
+  ],
+};
+
+// For display in profile views (use joining version as default)
+const questionsForDisplay = questionsByRole.joining;
 
 const PAGE_SIZE = 8;
 
@@ -42,7 +44,7 @@ function App() {
   const [loading, setLoading] = useState(false);
 
   const [answers, setAnswers] = useState({ grit: '', badass: '', vision: '' });
-  const [userType, setUserType] = useState(null); // 'hiring' or 'joining'
+  const [userType, setUserType] = useState('hiring'); // 'hiring' or 'joining'
   const [selectedCharacters, setSelectedCharacters] = useState([]); // [{id, name}]
   const [preference, setPreference] = useState('');
 
@@ -268,16 +270,17 @@ function App() {
   }, []);
 
   const validate = () => {
-    for (const q of questions) {
+    if (!userType) {
+      return 'Please select whether you want to hire or join.';
+    }
+    const currentQuestions = questionsByRole[userType];
+    for (const q of currentQuestions) {
       if (!answers[q.key]?.trim()) {
         return 'Please answer all questions.';
       }
       if (wordCount(answers[q.key]) > 140) {
         return 'Please keep each answer under 140 words.';
       }
-    }
-    if (!userType) {
-      return 'Please select whether you want to hire or join.';
     }
     return null;
   };
@@ -407,18 +410,18 @@ function App() {
       return;
     }
 
-    try {
-      await supabase.from('reminder_emails').insert({
-        email: reminderEmail.trim(),
-        created_at: new Date().toISOString()
-      });
-      setEmailSubmitted(true);
-      setErrorMsg('');
-    } catch (e) {
-      // If table doesn't exist, just show success anyway for now
-      setEmailSubmitted(true);
-      setErrorMsg('');
+    const { error } = await supabase.from('reminder_emails').insert({
+      email: reminderEmail.trim(),
+    });
+
+    if (error) {
+      console.error('Failed to save email:', error);
+      setErrorMsg('Failed to save. Please try again.');
+      return;
     }
+
+    setEmailSubmitted(true);
+    setErrorMsg('');
   };
 
   return (
@@ -453,55 +456,15 @@ function App() {
           <>
             {/* Manifesto */}
             <div className="manifesto">
-              {displayedLines.map((line, i) => (
-                line.isSpecial ? (
-                  <div key={i} className="difficulty-prompt" onClick={() => setShowDifficultyModal(true)}>
-                    <span>Feeling difficult answering these questions?</span>
-                    <svg className="info-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <circle cx="12" cy="12" r="10"/>
-                      <path d="M12 16v-4M12 8h.01"/>
-                    </svg>
-                  </div>
-                ) : (
-                  <div key={i} className={`manifesto-line ${line.muted ? 'muted' : ''}`}>
-                    {line.text || '\u00A0'}
-                  </div>
-                )
+              {manifestoLines.map((line, i) => (
+                <div key={i} className={`manifesto-line ${line.muted ? 'muted' : ''}`}>
+                  {line.text || '\u00A0'}
+                </div>
               ))}
-              {showCursor && <span className="cursor"></span>}
             </div>
 
-            {questions.map((q, i) => (
-              <div key={q.key} className={`input-group ${revealedInputs > i ? 'revealed' : ''}`}>
-                <div className="input-header">
-                  <label className="input-label">{q.label}</label>
-                  <span className="input-question">{q.question}</span>
-                </div>
-                <textarea
-                  className="terminal-input"
-                  value={answers[q.key]}
-                  placeholder={focusedInput === q.key && !answers[q.key] ? '140 words max' : ''}
-                  onFocus={() => setFocusedInput(q.key)}
-                  onBlur={() => setFocusedInput(null)}
-                  onChange={(e) => {
-                    setAnswers({ ...answers, [q.key]: e.target.value });
-                    autoResize(e.target);
-                  }}
-                  spellCheck="false"
-                  maxLength={1000}
-                />
-                <div className="input-footer">
-                  <span></span>
-                  {answers[q.key] && (
-                    <span className={`word-count ${wordCount(answers[q.key]) > 140 ? 'over' : ''}`}>
-                      {wordCount(answers[q.key])} / 140 words
-                    </span>
-                  )}
-                </div>
-              </div>
-            ))}
-
-            <div className={`checkbox-container ${revealedInputs > 3 ? 'revealed' : ''}`}>
+            {/* Role Selection - First */}
+            <div className="checkbox-container revealed">
               <label className="checkbox-label" onClick={() => setUserType(userType === 'hiring' ? null : 'hiring')}>
                 <span className={`checkbox-box ${userType === 'hiring' ? 'checked' : ''}`}></span>
                 I'm assembling a hero crew
@@ -512,10 +475,64 @@ function App() {
               </label>
             </div>
 
-            <div className={`btn-container ${revealedInputs > 4 ? 'revealed' : ''}`}>
-              <button className="execute-btn" onClick={submitAnswers}>Submit</button>
-              {errorMsg && <div className="error-msg">{errorMsg}</div>}
-            </div>
+            {/* Questions - Show after role selected */}
+            {userType && (
+              <>
+                {questionsByRole[userType].map((q, i) => (
+                  <div key={q.key} className="input-group revealed">
+                    <div className="input-header">
+                      <label className="input-label">{q.label}</label>
+                      <span className="input-question">{q.question}</span>
+                    </div>
+                    <textarea
+                      className="terminal-input"
+                      value={answers[q.key]}
+                      placeholder={focusedInput === q.key && !answers[q.key] ? '140 words max' : ''}
+                      onFocus={() => setFocusedInput(q.key)}
+                      onBlur={() => setFocusedInput(null)}
+                      onChange={(e) => {
+                        setAnswers({ ...answers, [q.key]: e.target.value });
+                        autoResize(e.target);
+                      }}
+                      spellCheck="false"
+                      maxLength={1000}
+                    />
+                    <div className="input-footer">
+                      <span></span>
+                      {answers[q.key] && (
+                        <span className={`word-count ${wordCount(answers[q.key]) > 140 ? 'over' : ''}`}>
+                          {wordCount(answers[q.key])} / 140 words
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+
+                <div className="btn-container revealed">
+                  <button className="execute-btn" onClick={submitAnswers}>Submit</button>
+                  {errorMsg && <div className="error-msg">{errorMsg}</div>}
+                </div>
+
+                {/* Difficulty Prompt */}
+                <div className="difficulty-prompt" onClick={() => setShowDifficultyModal(true)}>
+                  <span>Feeling difficult answering these questions?</span>
+                  <svg className="info-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M12 16v-4M12 8h.01"/>
+                  </svg>
+                </div>
+
+                {/* Our Principles */}
+                <div className="principles-section">
+                  <div className="principles-title">Our Principles</div>
+                  <div className="principles-content">
+                    <p>AI handles the grunt work now. Only hero teams made of hero individuals win.</p>
+                    <p>> Hero teams run lean—every hire must be a force multiplier.</p>
+                    <p>> Heroes seek missions worth their time and allies worth their trust.</p>
+                  </div>
+                </div>
+              </>
+            )}
           </>
         )}
 
@@ -624,7 +641,7 @@ function App() {
               <>
                 {/* User's answers - editable */}
                 <div className="section-title">YOUR ANSWERS TO THE CRITICAL QUESTIONS</div>
-                {questions.map((q) => (
+                {questionsForDisplay.map((q) => (
                   <div key={q.key} className="input-group revealed">
                     <div className="input-header">
                       <label className="input-label">{q.label}</label>
@@ -712,7 +729,7 @@ function App() {
 
             {selectedProfile.answers && (
               <div className="profile-answers">
-                {questions.map(q => (
+                {questionsForDisplay.map(q => (
                   <div key={q.key} className="profile-answer">
                     <div className="profile-answer-label">{q.label}</div>
                     <div className="profile-answer-text">

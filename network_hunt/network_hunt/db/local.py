@@ -125,6 +125,41 @@ def init_local_db():
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_enrichment_queue_status ON enrichment_queue(status, priority DESC)")
 
+        # 5. ph_profiles - Product Hunt 用户 profiles
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ph_profiles (
+                username TEXT PRIMARY KEY,
+                name TEXT,
+                bio TEXT,
+                avatar_url TEXT,
+                links TEXT,
+                followers_count INTEGER DEFAULT 0,
+                following_count INTEGER DEFAULT 0,
+                hunted_count INTEGER DEFAULT 0,
+                collections_count INTEGER DEFAULT 0,
+                reviews_count INTEGER DEFAULT 0,
+                badges TEXT,
+                following TEXT,
+                hunted_posts TEXT,
+                collections TEXT,
+                reviews TEXT,
+                fetched_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # 6. post_people - Post 和用户的关联
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS post_people (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_slug TEXT NOT NULL,
+                username TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(post_slug, username)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_post_people_post ON post_people(post_slug)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_post_people_user ON post_people(username)")
+
     print(f"Local database initialized: {DB_PATH}")
 
 
@@ -412,6 +447,118 @@ def get_queue_stats() -> dict:
             ).fetchone()[0]
             stats[status] = count
         return stats
+
+
+# ============================================
+# ph_profiles 操作
+# ============================================
+
+def upsert_profile(
+    username: str,
+    name: str | None = None,
+    bio: str | None = None,
+    avatar_url: str | None = None,
+    links: dict | None = None,
+    followers_count: int = 0,
+    following_count: int = 0,
+    hunted_count: int = 0,
+    collections_count: int = 0,
+    reviews_count: int = 0,
+    badges: list[str] | None = None,
+    following: list[str] | None = None,
+    hunted_posts: list[dict] | None = None,
+    collections: list | None = None,
+    reviews: list | None = None,
+):
+    """Insert or update a profile."""
+    with get_db() as conn:
+        conn.execute("""
+            INSERT INTO ph_profiles (username, name, bio, avatar_url, links,
+                                     followers_count, following_count, hunted_count,
+                                     collections_count, reviews_count, badges,
+                                     following, hunted_posts, collections, reviews, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(username) DO UPDATE SET
+                name = excluded.name,
+                bio = excluded.bio,
+                avatar_url = excluded.avatar_url,
+                links = excluded.links,
+                followers_count = excluded.followers_count,
+                following_count = excluded.following_count,
+                hunted_count = excluded.hunted_count,
+                collections_count = excluded.collections_count,
+                reviews_count = excluded.reviews_count,
+                badges = excluded.badges,
+                following = excluded.following,
+                hunted_posts = excluded.hunted_posts,
+                collections = excluded.collections,
+                reviews = excluded.reviews,
+                fetched_at = CURRENT_TIMESTAMP
+        """, (username, name, bio, avatar_url,
+              json.dumps(links) if links else None,
+              followers_count, following_count, hunted_count,
+              collections_count, reviews_count,
+              json.dumps(badges) if badges else None,
+              json.dumps(following) if following else None,
+              json.dumps(hunted_posts) if hunted_posts else None,
+              json.dumps([c.name if hasattr(c, 'name') else c for c in collections]) if collections else None,
+              json.dumps([{'tool': r.tool_name, 'product': r.product_name, 'text': r.text} if hasattr(r, 'tool_name') else r for r in reviews]) if reviews else None))
+
+
+def get_profile(username: str) -> dict | None:
+    """Get a profile by username."""
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM ph_profiles WHERE username = ?", (username,)).fetchone()
+        if row:
+            result = dict(row)
+            for field in ['links', 'badges', 'following', 'hunted_posts', 'collections', 'reviews']:
+                if result.get(field):
+                    result[field] = json.loads(result[field])
+            return result
+        return None
+
+
+def get_profiles_count() -> int:
+    """Get total profiles count."""
+    with get_db() as conn:
+        return conn.execute("SELECT COUNT(*) FROM ph_profiles").fetchone()[0]
+
+
+# ============================================
+# post_people 操作
+# ============================================
+
+def upsert_post_person(post_slug: str, username: str):
+    """Link a post to a username."""
+    with get_db() as conn:
+        conn.execute("""
+            INSERT INTO post_people (post_slug, username)
+            VALUES (?, ?)
+            ON CONFLICT(post_slug, username) DO NOTHING
+        """, (post_slug, username))
+
+
+def get_post_people(post_slug: str) -> list[str]:
+    """Get usernames for a post."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT username FROM post_people WHERE post_slug = ?",
+            (post_slug,)
+        ).fetchall()
+        return [row['username'] for row in rows]
+
+
+def get_unscraped_usernames(limit: int = 100) -> list[str]:
+    """Get usernames from post_people that don't have profiles yet."""
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT DISTINCT pp.username
+            FROM post_people pp
+            LEFT JOIN ph_profiles p ON pp.username = p.username
+            WHERE p.username IS NULL
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [row['username'] for row in rows]
 
 
 # Initialize on import

@@ -1,58 +1,54 @@
 """Product Hunt profile scraper using Playwright."""
 
 import re
-import time
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, Page, Browser, BrowserContext
+
+# 导航元素，用于过滤
+NAV_SKIP = {'About', 'Forums', 'Activity', 'Upvotes', 'Collections', 'Stacks',
+            'Reviews', 'Hunted', 'View more', 'View all', 'Report', 'Events',
+            'Meet others online and in-person', 'FAQ', 'Advertise', "What's new", 'Stories'}
 
 
 @dataclass
 class PHReview:
-    post_slug: str
-    post_name: str
-    rating: int | None
+    tool_name: str
+    product_name: str
     text: str
-    date: str | None
 
 
 @dataclass
 class PHCollection:
     name: str
-    slug: str
-    posts: list[str]  # post slugs
 
 
 @dataclass
 class PHMakerProduct:
     name: str
     slug: str
-    tagline: str | None
-    date: str | None
 
 
 @dataclass
 class PHProfile:
     username: str
     name: str | None = None
+    headline: str | None = None
     bio: str | None = None
     avatar_url: str | None = None
-    website: str | None = None
-    twitter: str | None = None
-    other_links: dict[str, str] = field(default_factory=dict)
+    links: list[str] = field(default_factory=list)  # list of URLs
 
     followers_count: int = 0
     following_count: int = 0
     hunted_count: int = 0
     collections_count: int = 0
-    stacks_count: int = 0
     reviews_count: int = 0
 
     badges: list[str] = field(default_factory=list)
-    maker_history: list[PHMakerProduct] = field(default_factory=list)
 
     # 第二层数据
-    following: list[str] = field(default_factory=list)  # usernames
-    hunted_posts: list[dict] = field(default_factory=list)  # {name, votes, comments}
+    following: list[str] = field(default_factory=list)
+    hunted_posts: list[dict] = field(default_factory=list)
     collections: list[PHCollection] = field(default_factory=list)
     reviews: list[PHReview] = field(default_factory=list)
 
@@ -63,7 +59,6 @@ class PHProfileScraper:
     def __init__(self, headless: bool = False):
         self.headless = headless
         self.browser: Browser | None = None
-        self.context: BrowserContext | None = None
         self.page: Page | None = None
         self._playwright = None
 
@@ -81,11 +76,11 @@ class PHProfileScraper:
             headless=self.headless,
             args=['--disable-blink-features=AutomationControlled']
         )
-        self.context = self.browser.new_context(
-            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        context = self.browser.new_context(
+            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
             viewport={'width': 1920, 'height': 1080},
         )
-        self.page = self.context.new_page()
+        self.page = context.new_page()
 
     def close(self):
         """Close browser."""
@@ -94,23 +89,27 @@ class PHProfileScraper:
         if self._playwright:
             self._playwright.stop()
 
-    def _wait_for_load(self, timeout: int = 5000):
+    def _wait_for_load(self):
         """Wait for page to load past Cloudflare."""
-        self.page.wait_for_timeout(timeout)
-        title = self.page.title()
-        if 'Just a moment' in title:
-            # Wait longer for Cloudflare
+        self.page.wait_for_timeout(5000)
+        if 'Just a moment' in self.page.title():
             self.page.wait_for_timeout(10000)
-            title = self.page.title()
-            if 'Just a moment' in title:
+            if 'Just a moment' in self.page.title():
                 raise Exception("Blocked by Cloudflare")
 
-    def _extract_count(self, text: str) -> int:
-        """Extract number from text like '11,618 followers'."""
-        match = re.search(r'([\d,]+)', text)
-        if match:
-            return int(match.group(1).replace(',', ''))
-        return 0
+    def _scroll_once(self) -> bool:
+        """Scroll to bottom. Returns True if page height changed."""
+        prev = self.page.evaluate('document.body.scrollHeight')
+        self.page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+        self.page.wait_for_timeout(1500)
+        return self.page.evaluate('document.body.scrollHeight') != prev
+
+    def _get_lines(self) -> list[str]:
+        """Get non-empty lines from main content."""
+        main = self.page.query_selector('main')
+        if not main:
+            return []
+        return [l.strip() for l in main.inner_text().split('\n') if l.strip()]
 
     def scrape_profile_main(self, username: str) -> PHProfile:
         """Scrape main profile page."""
@@ -121,404 +120,301 @@ class PHProfileScraper:
 
         profile = PHProfile(username=username)
 
-        # Name (h1)
+        # Name and Headline - usually h1 followed by headline text
         h1 = self.page.query_selector('h1')
         if h1:
             profile.name = h1.inner_text().strip()
+            # Headline is in the grandparent element of h1
+            # Structure: name -> badge -> headline -> stats
+            header = h1.evaluate_handle('el => el.parentElement.parentElement')
+            if header:
+                header_text = header.as_element().inner_text()
+                lines = [l.strip() for l in header_text.split('\n') if l.strip()]
+                # First line is name, collect headline lines after it
+                if len(lines) >= 2 and lines[0] == profile.name:
+                    headline_parts = []
+                    for line in lines[1:]:
+                        # Stop at stats (starts with # or digit, or contains "followers")
+                        if re.match(r'^[#\d]', line) or 'followers' in line.lower():
+                            break
+                        # Skip very long lines or navigation elements
+                        if len(line) > 100:
+                            break
+                        # Skip emoji-only lines or stacked products
+                        if 'stacked products' in line.lower():
+                            break
+                        headline_parts.append(line)
+                    if headline_parts:
+                        profile.headline = ' | '.join(headline_parts)
 
         # Avatar
         avatar = self.page.query_selector(f'img[alt="{profile.name}"]')
         if avatar:
             profile.avatar_url = avatar.get_attribute('src')
 
-        # Bio - 获取 main 区域的文本，找 About 后面的内容
+        # Bio and badges from main text
         main = self.page.query_selector('main')
         if main:
             main_text = main.inner_text()
-            # Bio 通常在 "About" 之后，"Links" 或 "Badges" 之前
-            about_match = re.search(r'About\s*\n(.+?)(?:\nLinks|\nBadges|\nMaker History|\n\d+\s*Hunted)', main_text, re.DOTALL)
-            if about_match:
-                profile.bio = about_match.group(1).strip()
+            # Bio
+            about = re.search(r'About\s*\n(.+?)(?:\nLinks|\nBadges|\nMaker History|\n\d+\s*Hunted)', main_text, re.DOTALL)
+            if about:
+                profile.bio = about.group(1).strip()
+            # Badges
+            badges = re.search(r'Badges\s*\n(.+?)(?:\nView all badges|\nMaker History|\nForums)', main_text, re.DOTALL)
+            if badges:
+                profile.badges = [l.strip() for l in badges.group(1).split('\n') if l.strip() and len(l) < 50]
 
-        # Links section
-        links = self.page.query_selector_all('a[href]')
-        for link in links:
+        # Links - collect external URLs (exclude producthunt-related links)
+        seen_urls = set()
+        for link in self.page.query_selector_all('a[href]'):
             href = link.get_attribute('href') or ''
-            text = link.inner_text().strip()
+            # Only external links
+            if not href.startswith('http'):
+                continue
+            # Extract domain for filtering (ignore query params)
+            domain = urlparse(href).netloc.lower()
+            # Skip producthunt-related domains
+            if 'producthunt' in domain:
+                continue
+            # Skip links to PH events or PH social accounts
+            if domain == 'lu.ma' and 'producthunt' in href.lower():
+                continue
+            if (domain in ('x.com', 'twitter.com') and
+                href.lower().rstrip('/').endswith('/producthunt')):
+                continue
+            if (domain == 'www.linkedin.com' and
+                '/company/producthunt' in href.lower()):
+                continue
+            if href not in seen_urls:
+                seen_urls.add(href)
+                profile.links.append(href)
 
-            if 'twitter.com/' in href or 'x.com/' in href:
-                match = re.search(r'(?:twitter\.com|x\.com)/(\w+)', href)
-                if match and not profile.twitter:
-                    profile.twitter = match.group(1)
-            elif text == 'Website' or (href.startswith('http') and 'producthunt' not in href):
-                if text == 'Website':
-                    profile.website = href
-                elif href.startswith('http') and 'producthunt' not in href and 'twitter' not in href and 'x.com' not in href:
-                    profile.other_links[text or 'link'] = href
-
-        # Counts from sidebar links
-        count_patterns = [
+        # Counts
+        page_text = self.page.content()
+        for pattern, attr in [
             (r'([\d,]+)\s*followers', 'followers_count'),
             (r'([\d,]+)\s*following', 'following_count'),
             (r'([\d,]+)\s*Hunted', 'hunted_count'),
             (r'([\d,]+)\s*Collections', 'collections_count'),
-            (r'([\d,]+)\s*Stacks', 'stacks_count'),
             (r'([\d,]+)\s*Reviews', 'reviews_count'),
-        ]
-
-        page_text = self.page.content()
-        for pattern, attr in count_patterns:
-            match = re.search(pattern, page_text, re.IGNORECASE)
-            if match:
-                setattr(profile, attr, int(match.group(1).replace(',', '')))
-
-        # Badges - 从页面文本中提取
-        if main:
-            main_text = main.inner_text()
-            badges_match = re.search(r'Badges\s*\n(.+?)(?:\nView all badges|\nMaker History|\nForums)', main_text, re.DOTALL)
-            if badges_match:
-                badges_text = badges_match.group(1).strip()
-                # 每行是一个 badge
-                for line in badges_text.split('\n'):
-                    line = line.strip()
-                    if line and len(line) < 50:
-                        profile.badges.append(line)
-
-        # Maker History
-        maker_links = self.page.query_selector_all('a[href*="/products/"], a[href*="/posts/"]')
-        seen_slugs = set()
-        for link in maker_links:
-            href = link.get_attribute('href') or ''
-            name = link.inner_text().strip()
-
-            # Extract slug
-            match = re.search(r'/(?:products|posts)/([^/?]+)', href)
-            if match and name and len(name) < 100:
-                slug = match.group(1)
-                if slug not in seen_slugs:
-                    seen_slugs.add(slug)
-                    profile.maker_history.append(PHMakerProduct(
-                        name=name,
-                        slug=slug,
-                        tagline=None,
-                        date=None,
-                    ))
+        ]:
+            m = re.search(pattern, page_text, re.IGNORECASE)
+            if m:
+                setattr(profile, attr, int(m.group(1).replace(',', '')))
 
         return profile
 
-    def _scroll_to_load(self, max_scrolls: int = 10, wait_ms: int = 1500) -> int:
-        """Scroll to load more content. Returns number of scrolls performed."""
-        for i in range(max_scrolls):
-            prev_height = self.page.evaluate('document.body.scrollHeight')
-            self.page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-            self.page.wait_for_timeout(wait_ms)
-            new_height = self.page.evaluate('document.body.scrollHeight')
-            if new_height == prev_height:
-                return i + 1  # No more content
-        return max_scrolls
+    def _goto_tab(self, username: str, tab: str):
+        """Navigate to a profile tab."""
+        self.page.goto(f'https://www.producthunt.com/@{username}/{tab}', timeout=60000)
+        self._wait_for_load()
 
-    def _click_nav_tab(self, text: str) -> bool:
-        """Click a navigation tab by text. Returns True if successful."""
-        # 找包含指定文字的导航链接
-        links = self.page.query_selector_all('a[href]')
-        for link in links:
-            link_text = link.inner_text().strip()
-            if text.lower() in link_text.lower():
+    def scrape_following(self, username: str, max_items: int = 200) -> list[str]:
+        """Scrape following list."""
+        print(f"Scraping following for @{username} (max {max_items})")
+        self._goto_tab(username, 'following')
+
+        following = set()
+        for _ in range(max_items // 20 + 1):
+            for link in self.page.query_selector_all('a[href*="/@"]'):
                 href = link.get_attribute('href') or ''
-                # 确保是当前用户的导航链接
-                if '/@' in href and ('following' in href or 'submitted' in href or
-                                     'collections' in href or 'reviews' in href):
-                    link.click()
-                    self.page.wait_for_timeout(2000)
-                    return True
-        return False
+                m = re.search(r'/@(\w+)$', href)
+                if m and m.group(1) != username:
+                    following.add(m.group(1))
 
-    def scrape_following(self, username: str, max_pages: int = 10) -> list[str]:
-        """Scrape following list. Assumes already on user's profile page."""
-        print(f"Scraping following for @{username}")
+            if len(following) >= max_items or not self._scroll_once():
+                break
 
-        # 尝试点击导航，如果失败则直接访问URL
-        if not self._click_nav_tab('following'):
-            self.page.goto(f'https://www.producthunt.com/@{username}/following', timeout=60000)
-            self._wait_for_load()
+        result = list(following)[:max_items]
+        print(f"  Found {len(result)} following")
+        return result
 
-        following = []
-        seen = set()
-
-        for _ in range(max_pages):
-            # 找所有用户链接
-            links = self.page.query_selector_all('a[href*="/@"]')
-
-            for link in links:
-                href = link.get_attribute('href') or ''
-                match = re.search(r'/@(\w+)$', href)
-                if match:
-                    uname = match.group(1)
-                    if uname != username and uname not in seen:
-                        seen.add(uname)
-                        following.append(uname)
-
-            # 尝试滚动加载更多
-            prev_count = len(following)
-            self.page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-            self.page.wait_for_timeout(2000)
-
-            # 检查是否有新内容
-            links = self.page.query_selector_all('a[href*="/@"]')
-            for link in links:
-                href = link.get_attribute('href') or ''
-                match = re.search(r'/@(\w+)$', href)
-                if match:
-                    uname = match.group(1)
-                    if uname != username and uname not in seen:
-                        seen.add(uname)
-                        following.append(uname)
-
-            if len(following) == prev_count:
-                break  # 没有更多了
-
-        print(f"  Found {len(following)} following")
-        return following
-
-    def scrape_hunted(self, username: str, max_items: int = 100, max_scrolls: int = 20) -> list[dict]:
+    def scrape_hunted(self, username: str, max_items: int = 100) -> list[dict]:
         """Scrape hunted posts. Returns list of {name, tagline, votes, comments}."""
         print(f"Scraping hunted posts for @{username} (max {max_items})")
-
-        # 尝试点击导航，如果失败则直接访问URL
-        if not self._click_nav_tab('hunted'):
-            self.page.goto(f'https://www.producthunt.com/@{username}/submitted', timeout=60000)
-            self._wait_for_load()
+        self._goto_tab(username, 'submitted')
 
         posts = []
         seen = set()
 
-        for scroll in range(max_scrolls):
-            # 从页面文本提取产品信息
-            main = self.page.query_selector('main')
-            if main:
-                text = main.inner_text()
-                lines = [l.strip() for l in text.split('\n') if l.strip()]
+        for _ in range(max_items // 5 + 1):
+            lines = self._get_lines()
+            i = 0
+            while i < len(lines) - 3:
+                line = lines[i]
+                if line and not line.isdigit() and 3 < len(line) < 80:
+                    n1, n2, n3 = lines[i+1], lines[i+2], lines[i+3]
+                    tagline, nums = None, []
 
-                i = 0
-                while i < len(lines) - 3:
-                    line = lines[i]
-                    # 产品名通常较短且不是纯数字
-                    if line and not line.isdigit() and 3 < len(line) < 80:
-                        next1 = lines[i+1] if i+1 < len(lines) else ''
-                        next2 = lines[i+2] if i+2 < len(lines) else ''
-                        next3 = lines[i+3] if i+3 < len(lines) else ''
+                    if not n1.isdigit() and n2.isdigit() and n3.isdigit():
+                        tagline, nums = n1, [int(n2), int(n3)]
+                    elif n1.isdigit() and n2.isdigit():
+                        nums = [int(n1), int(n2)]
 
-                        tagline = None
-                        nums = []
+                    if nums and line not in seen and line not in NAV_SKIP:
+                        if not line.endswith('followers') and not line.endswith('following'):
+                            seen.add(line)
+                            if tagline:
+                                seen.add(tagline)
+                            posts.append({'name': line, 'tagline': tagline, 'votes': nums[0], 'comments': nums[1]})
+                i += 1
 
-                        # 模式1: name, tagline, votes, comments
-                        if not next1.isdigit() and next2.isdigit() and next3.isdigit():
-                            tagline = next1
-                            nums = [int(next2), int(next3)]
-                        # 模式2: name, votes, comments (无 tagline)
-                        elif next1.isdigit() and next2.isdigit():
-                            nums = [int(next1), int(next2)]
-
-                        if len(nums) == 2 and line not in seen:
-                            skip = ['About', 'Forums', 'Activity', 'Upvotes', 'Collections',
-                                    'Stacks', 'Reviews', 'Hunted', 'View more', 'View all',
-                                    'Events', 'Meet others online and in-person', 'FAQ',
-                                    'Advertise', 'What\'s new', 'Stories']
-                            if line not in skip and not line.endswith('followers') and not line.endswith('following'):
-                                seen.add(line)
-                                if tagline:
-                                    seen.add(tagline)
-                                posts.append({
-                                    'name': line,
-                                    'tagline': tagline,
-                                    'votes': nums[0],
-                                    'comments': nums[1],
-                                })
-                    i += 1
-
-            # 检查是否达到上限
-            if len(posts) >= max_items:
-                posts = posts[:max_items]
+            if len(posts) >= max_items or not self._scroll_once():
                 break
 
-            # 滚动加载
-            prev_height = self.page.evaluate('document.body.scrollHeight')
-            self.page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-            self.page.wait_for_timeout(1500)
-            new_height = self.page.evaluate('document.body.scrollHeight')
+        result = posts[:max_items]
+        print(f"  Found {len(result)} hunted posts")
+        return result
 
-            if new_height == prev_height:
-                break  # 没有更多内容了
-
-        print(f"  Found {len(posts)} hunted posts")
-        return posts
-
-    def scrape_collections(self, username: str, max_items: int = 100, max_scrolls: int = 20) -> list[PHCollection]:
-        """Scrape collections. Returns list of collection names."""
+    def scrape_collections(self, username: str, max_items: int = 100) -> list[PHCollection]:
+        """Scrape collections."""
         print(f"Scraping collections for @{username} (max {max_items})")
-
-        # 尝试点击导航，如果失败则直接访问URL
-        if not self._click_nav_tab('collections'):
-            self.page.goto(f'https://www.producthunt.com/@{username}/collections', timeout=60000)
-            self._wait_for_load()
+        self._goto_tab(username, 'collections')
 
         collections = []
         seen = set()
 
-        for scroll in range(max_scrolls):
-            main = self.page.query_selector('main')
-            if main:
-                text = main.inner_text()
-                lines = [l.strip() for l in text.split('\n') if l.strip()]
+        for _ in range(max_items // 5 + 1):
+            lines = self._get_lines()
+            for i, line in enumerate(lines[:-1]):
+                next_line = lines[i + 1]
+                if re.match(r'\d+\s+products?', next_line) and line not in seen and line not in NAV_SKIP:
+                    if line and not line.isdigit() and len(line) < 100:
+                        seen.add(line)
+                        collections.append(PHCollection(name=line))
 
-                i = 0
-                while i < len(lines) - 1:
-                    line = lines[i]
-                    next_line = lines[i + 1] if i + 1 < len(lines) else ''
-
-                    # 检查是否是 "name\nN products" 格式
-                    match = re.match(r'(\d+)\s+products?', next_line)
-                    if match and line and not line.isdigit() and len(line) < 100:
-                        skip = ['About', 'Forums', 'Activity', 'Upvotes', 'Collections',
-                                'Stacks', 'Reviews', 'Hunted', 'View more', 'Report']
-                        if line not in skip and line not in seen:
-                            seen.add(line)
-                            slug = line.lower().replace(' ', '-').replace("'", '')
-                            collections.append(PHCollection(
-                                name=line,
-                                slug=slug,
-                                posts=[],
-                            ))
-                    i += 1
-
-            if len(collections) >= max_items:
-                collections = collections[:max_items]
+            if len(collections) >= max_items or not self._scroll_once():
                 break
 
-            # 滚动加载
-            prev_height = self.page.evaluate('document.body.scrollHeight')
-            self.page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-            self.page.wait_for_timeout(1500)
-            new_height = self.page.evaluate('document.body.scrollHeight')
+        result = collections[:max_items]
+        print(f"  Found {len(result)} collections")
+        return result
 
-            if new_height == prev_height:
-                break
-
-        print(f"  Found {len(collections)} collections")
-        return collections
-
-    def scrape_reviews(self, username: str, max_items: int = 50, max_scrolls: int = 10) -> list[PHReview]:
+    def scrape_reviews(self, username: str, max_items: int = 50) -> list[PHReview]:
         """Scrape reviews."""
         print(f"Scraping reviews for @{username} (max {max_items})")
-
-        # 尝试点击导航，如果失败则直接访问URL
-        if not self._click_nav_tab('reviews'):
-            self.page.goto(f'https://www.producthunt.com/@{username}/reviews', timeout=60000)
-            self._wait_for_load()
+        self._goto_tab(username, 'reviews')
 
         reviews = []
         seen = set()
 
-        for scroll in range(max_scrolls):
-            # 从页面文本解析 reviews
-            # 结构: Username / "used" / 工具名 / "to build" / 产品名 / "(N points)" / "•" / "N reviews" / 评论内容 / Helpful...
-            main = self.page.query_selector('main')
-            if main:
-                text = main.inner_text()
-                lines = [l.strip() for l in text.split('\n') if l.strip()]
+        for _ in range(max_items // 5 + 1):
+            lines = self._get_lines()
+            i = 0
+            while i < len(lines) - 5:
+                # 格式: "used" / 工具名 / "to build" / 产品名 / ... / 评论内容 / Helpful
+                if lines[i] == 'used' and lines[i + 2] == 'to build':
+                    tool, product = lines[i + 1], lines[i + 3]
 
-                i = 0
-                while i < len(lines) - 5:
-                    if lines[i] == 'used' and i + 3 < len(lines) and lines[i + 2] == 'to build':
-                        tool_name = lines[i + 1]
-                        product_name = lines[i + 3]
+                    # 跳过 points/reviews 行，找评论内容
+                    j = i + 4
+                    while j < len(lines) and ('points' in lines[j] or 'reviews' in lines[j] or lines[j] == '•'):
+                        j += 1
 
-                        j = i + 4
-                        while j < len(lines) and ('points' in lines[j] or 'reviews' in lines[j] or lines[j] == '•'):
-                            j += 1
+                    # 收集到 Helpful/Share/Report 为止
+                    text_parts = []
+                    while j < len(lines) and lines[j] not in ['Helpful', 'Share', 'Report']:
+                        if 'views' not in lines[j] and not re.match(r'\d+[dhm]?\s*ago', lines[j]):
+                            text_parts.append(lines[j])
+                        else:
+                            break
+                        j += 1
 
-                        review_lines = []
-                        while j < len(lines):
-                            if lines[j] in ['Helpful', 'Share', 'Report'] or 'views' in lines[j] or re.match(r'\d+[dhm]?\s*ago', lines[j]):
-                                break
-                            review_lines.append(lines[j])
-                            j += 1
+                    text = ' '.join(text_parts).strip()
+                    key = (tool, product)
+                    if text and key not in seen:
+                        seen.add(key)
+                        reviews.append(PHReview(tool_name=tool, product_name=product, text=text[:500]))
+                i += 1
 
-                        review_text = ' '.join(review_lines).strip()
-
-                        key = (tool_name, product_name)
-                        if review_text and key not in seen:
-                            seen.add(key)
-                            reviews.append(PHReview(
-                                post_slug=tool_name.lower().replace(' ', '-'),
-                                post_name=f"{tool_name} (for {product_name})",
-                                rating=None,
-                                text=review_text[:500],
-                                date=None,
-                            ))
-                    i += 1
-
-            if len(reviews) >= max_items:
-                reviews = reviews[:max_items]
+            if len(reviews) >= max_items or not self._scroll_once():
                 break
 
-            # 滚动加载
-            prev_height = self.page.evaluate('document.body.scrollHeight')
-            self.page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-            self.page.wait_for_timeout(1500)
-            new_height = self.page.evaluate('document.body.scrollHeight')
-
-            if new_height == prev_height:
-                break
-
-        print(f"  Found {len(reviews)} reviews")
-        return reviews
+        result = reviews[:max_items]
+        print(f"  Found {len(result)} reviews")
+        return result
 
     def scrape_full_profile(
-        self,
-        username: str,
-        max_following: int = 200,
-        max_hunted: int = 100,
-        max_collections: int = 100,
-        max_reviews: int = 50,
+        self, username: str,
+        max_following: int = 200, max_hunted: int = 100,
+        max_collections: int = 100, max_reviews: int = 50,
     ) -> PHProfile:
         """Scrape complete profile with all second-level data."""
-        # 第一层：主页
         profile = self.scrape_profile_main(username)
 
-        # 第二层：following
         if profile.following_count > 0:
-            profile.following = self.scrape_following(username, max_pages=max_following // 20 + 1)
-
-        # 第二层：hunted posts
+            profile.following = self.scrape_following(username, max_following)
         if profile.hunted_count > 0:
-            profile.hunted_posts = self.scrape_hunted(username, max_items=max_hunted)
-
-        # 第二层：collections
+            profile.hunted_posts = self.scrape_hunted(username, max_hunted)
         if profile.collections_count > 0:
-            profile.collections = self.scrape_collections(username, max_items=max_collections)
-
-        # 第二层：reviews
+            profile.collections = self.scrape_collections(username, max_collections)
         if profile.reviews_count > 0:
-            profile.reviews = self.scrape_reviews(username, max_items=max_reviews)
+            profile.reviews = self.scrape_reviews(username, max_reviews)
 
         return profile
 
 
-def scrape_profile(
-    username: str,
-    headless: bool = False,
-    max_following: int = 200,
-    max_hunted: int = 100,
-    max_collections: int = 100,
-    max_reviews: int = 50,
-) -> PHProfile:
+    def scrape_post_people(self, slug: str) -> list[str]:
+        """Scrape makers/hunters from a post page. Returns list of usernames."""
+        print(f"Scraping post: {slug}")
+        self.page.goto(f'https://www.producthunt.com/posts/{slug}', timeout=60000)
+        self._wait_for_load()
+
+        makers = []
+        seen = set()
+        lines = self._get_lines()
+
+        # 策略1: 找 "Maker" 标签前面的用户名
+        # 页面结构: "用户名" / "公司名" / "Maker" / 评论内容...
+        for i, line in enumerate(lines):
+            if line == 'Maker' and i >= 2:
+                # 往前找用户名 - 通常是前2行之一
+                for j in range(1, 4):
+                    if i - j >= 0:
+                        candidate = lines[i - j]
+                        # 用户名通常短，不含特殊字符
+                        if candidate and len(candidate) < 50 and candidate not in seen:
+                            # 验证是否真的是用户链接
+                            for link in self.page.query_selector_all('a[href*="/@"]'):
+                                link_text = link.inner_text().strip()
+                                if link_text == candidate:
+                                    href = link.get_attribute('href') or ''
+                                    m = re.search(r'/@(\w+)$', href)
+                                    if m:
+                                        seen.add(candidate)
+                                        makers.append(m.group(1))
+                                    break
+
+        # 策略2: 如果没找到，看 "Launch Team" 区域的链接
+        if not makers:
+            in_launch_team = False
+            for i, line in enumerate(lines):
+                if line == 'Launch Team':
+                    in_launch_team = True
+                elif in_launch_team and line in ('Promoted', 'What do you think', 'Login to comment'):
+                    break
+                elif in_launch_team:
+                    # 在 Launch Team 区域内找用户链接
+                    for link in self.page.query_selector_all('a[href*="/@"]'):
+                        href = link.get_attribute('href') or ''
+                        m = re.search(r'/@(\w+)$', href)
+                        if m and m.group(1) not in seen:
+                            seen.add(m.group(1))
+                            makers.append(m.group(1))
+                    break
+
+        print(f"  Found {len(makers)} makers")
+        return makers
+
+
+def scrape_profile(username: str, headless: bool = False, **kwargs) -> PHProfile:
     """Convenience function to scrape a profile."""
     with PHProfileScraper(headless=headless) as scraper:
-        return scraper.scrape_full_profile(
-            username,
-            max_following=max_following,
-            max_hunted=max_hunted,
-            max_collections=max_collections,
-            max_reviews=max_reviews,
-        )
+        return scraper.scrape_full_profile(username, **kwargs)
+
+
+def scrape_post_people(slug: str, headless: bool = False) -> list[str]:
+    """Convenience function to scrape usernames from a post."""
+    with PHProfileScraper(headless=headless) as scraper:
+        return scraper.scrape_post_people(slug)

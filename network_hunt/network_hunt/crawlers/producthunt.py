@@ -1,13 +1,13 @@
 import time
 from datetime import datetime, timedelta
 from typing import Literal
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from gql import gql, Client
 from gql.transport.httpx import HTTPXTransport
 
 from ..config import config
 from ..db import supabase
-from ..db.local import upsert_post, upsert_comment
+from ..scrapers.ph_profile import PHProfileScraper, PHProfile
 
 
 @dataclass
@@ -177,37 +177,26 @@ class ProductHuntCrawler:
         )
 
     def save_post(self, post: PHPost):
-        """Save post and comments to local SQLite."""
-        upsert_post(
-            id=post.id,
-            name=post.name,
-            tagline=post.tagline,
-            description=post.description,
-            slug=post.slug,
-            url=post.url,
-            website_url=post.website,
-            votes_count=post.votes_count,
-            comments_count=post.comments_count,
-            reviews_rating=post.reviews_rating,
-            reviews_count=post.reviews_count,
-            topics=post.topics,
-            product_links=[{"type": pl.type, "url": pl.url} for pl in post.product_links],
-            media=[{"type": m.type, "url": m.url} for m in post.media],
-            featured_at=post.featured_at,
-            created_at=post.created_at,
-        )
-
-        # Save comments
-        for comment in post.comments:
-            upsert_comment(
-                id=comment.id,
-                post_id=post.id,
-                body=comment.body,
-                user_id=comment.user_id,
-                user_name=comment.user_name,
-                user_username=comment.user_username,
-                created_at=comment.created_at,
-            )
+        """Save post to Supabase."""
+        data = {
+            "id": post.id,
+            "name": post.name,
+            "tagline": post.tagline,
+            "description": post.description,
+            "slug": post.slug,
+            "url": post.url,
+            "website_url": post.website,
+            "votes_count": post.votes_count,
+            "comments_count": post.comments_count,
+            "reviews_rating": post.reviews_rating,
+            "reviews_count": post.reviews_count,
+            "topics": post.topics,
+            "product_links": [{"type": pl.type, "url": pl.url} for pl in post.product_links],
+            "media": [{"type": m.type, "url": m.url} for m in post.media],
+            "featured_at": post.featured_at,
+            "created_at": post.created_at,
+        }
+        supabase.table("ph_posts").upsert(data, on_conflict="id").execute()
 
     def crawl_backfill(self, days: int = 30, max_posts: int | None = None):
         """Crawl historical data, going backwards from oldest_date."""
@@ -332,7 +321,94 @@ class ProductHuntCrawler:
         else:
             self.crawl_incremental()
 
+    def scrape_posts(self, slugs: list[str]):
+        """Scrape usernames from post pages and save to Supabase."""
+        print(f"\nScraping {len(slugs)} posts for usernames...")
+        with PHProfileScraper() as scraper:
+            for i, slug in enumerate(slugs):
+                try:
+                    usernames = scraper.scrape_post_people(slug)
+                    for username in usernames:
+                        supabase.table("ph_post_people").upsert(
+                            {"post_slug": slug, "username": username},
+                            on_conflict="post_slug,username"
+                        ).execute()
+                    print(f"  [{i+1}/{len(slugs)}] {slug}: {len(usernames)} makers")
+                except Exception as e:
+                    print(f"  [{i+1}/{len(slugs)}] {slug}: error - {e}")
 
-def crawl_producthunt(mode: Literal["backfill", "incremental"], days: int = 7, max_posts: int | None = None):
+    def get_unscraped_usernames(self) -> list[str]:
+        """Get usernames from ph_post_people that don't have profiles yet."""
+        # Get all usernames from ph_post_people
+        post_people = supabase.table("ph_post_people").select("username").execute()
+        all_usernames = set(row["username"] for row in post_people.data)
+
+        # Get usernames that already have profiles
+        profiles = supabase.table("ph_profiles").select("username").execute()
+        scraped_usernames = set(row["username"] for row in profiles.data)
+
+        # Return unscraped
+        return list(all_usernames - scraped_usernames)
+
+    def save_profile(self, profile: PHProfile):
+        """Save profile to Supabase."""
+        data = {
+            "username": profile.username,
+            "name": profile.name,
+            "headline": profile.headline,
+            "bio": profile.bio,
+            "avatar_url": profile.avatar_url,
+            "links": profile.links if profile.links else None,
+            "followers_count": profile.followers_count,
+            "following_count": profile.following_count,
+            "hunted_count": profile.hunted_count,
+            "collections_count": profile.collections_count,
+            "reviews_count": profile.reviews_count,
+            "badges": profile.badges if profile.badges else None,
+            "following": profile.following if profile.following else None,
+            "hunted_posts": profile.hunted_posts if profile.hunted_posts else None,
+            "collections": [c.name if hasattr(c, "name") else c for c in profile.collections] if profile.collections else None,
+            "reviews": [
+                {"tool": r.tool_name, "product": r.product_name, "text": r.text} if hasattr(r, "tool_name") else r
+                for r in profile.reviews
+            ] if profile.reviews else None,
+        }
+        supabase.table("ph_profiles").upsert(data, on_conflict="username").execute()
+
+    def scrape_profiles(self):
+        """Scrape profiles for all usernames that don't have profiles yet."""
+        usernames = self.get_unscraped_usernames()
+        if not usernames:
+            print("No unscraped usernames found")
+            return
+
+        print(f"\nScraping {len(usernames)} profiles...")
+        with PHProfileScraper() as scraper:
+            for i, username in enumerate(usernames):
+                try:
+                    profile = scraper.scrape_full_profile(username)
+                    self.save_profile(profile)
+                    print(f"  [{i+1}/{len(usernames)}] @{username}: {profile.name}")
+                except Exception as e:
+                    print(f"  [{i+1}/{len(usernames)}] @{username}: error - {e}")
+
+
+def crawl_producthunt(
+    mode: Literal["backfill", "incremental"],
+    days: int = 7,
+    max_posts: int | None = None,
+    scrape: bool = False,
+):
     crawler = ProductHuntCrawler()
     crawler.crawl(mode, days=days, max_posts=max_posts)
+
+    if scrape:
+        # Get recent posts from Supabase
+        result = supabase.table("ph_posts").select("slug").order(
+            "fetched_at", desc=True
+        ).limit(max_posts or 100).execute()
+        slugs = [row["slug"] for row in result.data]
+
+        if slugs:
+            crawler.scrape_posts(slugs)
+            crawler.scrape_profiles()
