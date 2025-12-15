@@ -938,17 +938,28 @@ h1 {
     border-top: 1px solid var(--tactical-gray);
 }
 
-.principles-title {
-    color: var(--terminal-green);
-    font-size: 0.9rem;
-    text-transform: uppercase;
-    letter-spacing: 2px;
-    margin-bottom: 1.5rem;
+.principles-header {
+    color: var(--text-white);
+    font-size: 1.4rem;
+    font-weight: 600;
+    margin-bottom: 2rem;
+}
+
+.principles-subtitle {
+    color: #ccc;
+    font-size: 1.05rem;
+    font-weight: 500;
+    margin-bottom: 0.75rem;
+    margin-top: 1.5rem;
+}
+
+.principles-subtitle:first-of-type {
+    margin-top: 0;
 }
 
 .principles-content p {
-    color: var(--muted);
+    color: #aaa;
     line-height: 1.8;
-    margin-bottom: 0.75rem;
+    margin-bottom: 0.6rem;
     font-size: 0.95rem;
 }

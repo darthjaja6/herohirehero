@@ -10,7 +10,7 @@ const manifestoLines = [
   { text: "We help hero teams hire heroes", muted: true },
   { text: "", muted: false },
   { text: "3 sharp questions separate heroes from the rest.", muted: false },
-  { text: "Answer them. Get matched.", muted: false },
+  { text: "Answer them. Hire the best—or find your dream team—in 5% of the time.", muted: false },
 ];
 
 const questionsByRole = {
@@ -58,6 +58,7 @@ function App() {
   const [selectedProfile, setSelectedProfile] = useState(null);
   const [showPreferenceModal, setShowPreferenceModal] = useState(false);
   const [showDifficultyModal, setShowDifficultyModal] = useState(false);
+  const [showWhyModal, setShowWhyModal] = useState(false);
   const [reminderEmail, setReminderEmail] = useState('');
   const [emailSubmitted, setEmailSubmitted] = useState(false);
 
@@ -465,11 +466,11 @@ function App() {
 
             {/* Role Selection - First */}
             <div className="checkbox-container revealed">
-              <label className="checkbox-label" onClick={() => setUserType(userType === 'hiring' ? null : 'hiring')}>
+              <label className="checkbox-label" onClick={() => setUserType('hiring')}>
                 <span className={`checkbox-box ${userType === 'hiring' ? 'checked' : ''}`}></span>
                 I'm assembling a hero crew
               </label>
-              <label className="checkbox-label" onClick={() => setUserType(userType === 'joining' ? null : 'joining')}>
+              <label className="checkbox-label" onClick={() => setUserType('joining')}>
                 <span className={`checkbox-box ${userType === 'joining' ? 'checked' : ''}`}></span>
                 I'm looking for a hero team
               </label>
@@ -515,21 +516,12 @@ function App() {
 
                 {/* Difficulty Prompt */}
                 <div className="difficulty-prompt" onClick={() => setShowDifficultyModal(true)}>
-                  <span>Feeling difficult answering these questions?</span>
-                  <svg className="info-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <circle cx="12" cy="12" r="10"/>
-                    <path d="M12 16v-4M12 8h.01"/>
-                  </svg>
+                  <span>Feeling difficult answering these questions? →</span>
                 </div>
 
-                {/* Our Principles */}
-                <div className="principles-section">
-                  <div className="principles-title">Our Principles</div>
-                  <div className="principles-content">
-                    <p>AI handles the grunt work now. Only hero teams made of hero individuals win.</p>
-                    <p>> Hero teams run lean—every hire must be a force multiplier.</p>
-                    <p>> Heroes seek missions worth their time and allies worth their trust.</p>
-                  </div>
+                {/* Why we build this - clickable link */}
+                <div className="difficulty-prompt" onClick={() => setShowWhyModal(true)}>
+                  <span>Why we build this →</span>
                 </div>
               </>
             )}
@@ -746,6 +738,33 @@ function App() {
                 <div className="profile-answer-text">{selectedProfile.preference}</div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Why We Build This Modal */}
+      {showWhyModal && (
+        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowWhyModal(false)}>
+          <div className="modal-content difficulty-modal">
+            <button className="modal-close" onClick={() => setShowWhyModal(false)}>×</button>
+
+            <div className="difficulty-modal-content">
+              <p><strong>Traditional recruiting wastes the time of hero teams and hero candidates.</strong></p>
+              <p>I bet you've been there. Five minutes into a leetcode interview, you already know it's a waste of time. No match. No chemistry. But you sit through the remaining 40 minutes anyway, watching your time drain away. How many times has this happened to you? How many hours have you lost?</p>
+              <p>Here's why: traditional recruiting uses years of experience, titles, company brands, and "participated in X" as signals. But for exceptional companies, these are just noise. And they tell you nothing about whether someone is actually exceptional. So mismatches like this happen constantly—wasting time for hero teams and hero candidates alike.</p>
+
+              <p style={{ marginTop: '1.5rem' }}><strong>Three questions cut through the noise.</strong></p>
+              <p>I've hired for my own startup. These 3 questions separate heroes from the rest almost instantly:</p>
+              <p>• What's your proudest accomplishment?</p>
+              <p>• What's the hardest problem you've conquered?</p>
+              <p>• What's your vision for the future?</p>
+              <p>Simple. Brutal. Effective. Heroes have answers—they've done the work.</p>
+              <p>And great candidates ask me the same questions back. That's how they know if my team is worth their time.</p>
+
+              <p style={{ marginTop: '1.5rem' }}><strong>We find heroes differently.</strong></p>
+              <p>We're not another resume database. We search deep, with context—not shallow keyword matching.</p>
+              <p>We cut through the noise so heroes find heroes—fast.</p>
+            </div>
           </div>
         </div>
       )}

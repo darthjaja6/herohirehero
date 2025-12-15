@@ -2,6 +2,8 @@
 """Network Hunt CLI - Discover talented makers from Product Hunt."""
 
 import click
+import subprocess
+import sys
 
 from .db import supabase
 from .workers import APIWorker, PostScraperWorker, ProfileScraperWorker
@@ -25,7 +27,7 @@ def crawl():
 @click.option("-m", "--mode", type=click.Choice(["backfill", "incremental"]), default="incremental")
 @click.option("-d", "--days", type=int, default=7, help="Days to crawl back (backfill mode)")
 @click.option("--schedule-only", is_flag=True, help="Only schedule tasks, don't run")
-@click.option("-l", "--limit", type=int, default=100, help="Maximum tasks to process")
+@click.option("-l", "--limit", type=int, default=0, help="Maximum tasks to process (0=unlimited)")
 def crawl_api(mode: str, days: int, schedule_only: bool, limit: int):
     """Crawl Product Hunt API for posts."""
     if mode == "backfill":
@@ -34,43 +36,95 @@ def crawl_api(mode: str, days: int, schedule_only: bool, limit: int):
         APIWorker.schedule_incremental()
 
     if not schedule_only:
-        APIWorker().run(limit)
+        APIWorker().run(limit if limit > 0 else 100000)
 
 
 @crawl.command("posts")
-@click.option("-l", "--limit", type=int, default=100, help="Maximum tasks to process")
+@click.option("-l", "--limit", type=int, default=0, help="Maximum tasks to process (0=unlimited)")
 def crawl_posts(limit: int):
     """Scrape post pages for makers."""
-    PostScraperWorker().run(limit)
+    PostScraperWorker().run(limit if limit > 0 else 100000)
 
 
 @crawl.command("profiles")
-@click.option("-l", "--limit", type=int, default=100, help="Maximum tasks to process")
+@click.option("-l", "--limit", type=int, default=0, help="Maximum tasks to process (0=unlimited)")
 def crawl_profiles(limit: int):
     """Scrape user profiles."""
-    ProfileScraperWorker().run(limit)
+    ProfileScraperWorker().run(limit if limit > 0 else 100000)
 
 
 @crawl.command("all")
 @click.option("-m", "--mode", type=click.Choice(["backfill", "incremental"]), default="incremental")
 @click.option("-d", "--days", type=int, default=7, help="Days to crawl back (backfill mode)")
-@click.option("-l", "--limit", type=int, default=100, help="Maximum tasks per stage")
+@click.option("-l", "--limit", type=int, default=0, help="Maximum tasks per stage (0=unlimited)")
 def crawl_all(mode: str, days: int, limit: int):
     """Run all crawl stages in sequence."""
+    effective_limit = limit if limit > 0 else 100000
+
     click.echo("=== Stage 1: API ===")
     if mode == "backfill":
         APIWorker.schedule_backfill(days)
     else:
         APIWorker.schedule_incremental()
-    APIWorker().run(limit)
+    APIWorker().run(effective_limit)
 
     click.echo("\n=== Stage 2: Post Scraping ===")
-    PostScraperWorker().run(limit)
+    PostScraperWorker().run(effective_limit)
 
     click.echo("\n=== Stage 3: Profile Scraping ===")
-    ProfileScraperWorker().run(limit)
+    ProfileScraperWorker().run(effective_limit)
 
     click.echo("\nAll stages completed!")
+
+
+@crawl.command("parallel")
+@click.option("-m", "--mode", type=click.Choice(["backfill", "incremental"]), default="incremental")
+@click.option("-d", "--days", type=int, default=7, help="Days to crawl back (backfill mode)")
+@click.option("-l", "--limit", type=int, default=0, help="Maximum tasks per worker (0=unlimited)")
+def crawl_parallel(mode: str, days: int, limit: int):
+    """Run all crawl stages in parallel as independent processes."""
+    # Schedule API tasks first
+    if mode == "backfill":
+        APIWorker.schedule_backfill(days)
+    else:
+        APIWorker.schedule_incremental()
+
+    click.echo("Starting 3 independent workers...\n")
+
+    limit_args = ["-l", str(limit)] if limit > 0 else []
+
+    # Start each worker as an independent subprocess
+    processes = []
+    commands = [
+        ("api", ["network-hunt", "crawl", "api", "--schedule-only"] + limit_args),
+        ("posts", ["network-hunt", "crawl", "posts"] + limit_args),
+        ("profiles", ["network-hunt", "crawl", "profiles"] + limit_args),
+    ]
+
+    # Also run API worker (not just schedule)
+    commands[0] = ("api", ["network-hunt", "crawl", "api", "-m", mode] + (["-d", str(days)] if mode == "backfill" else []) + limit_args)
+
+    for name, cmd in commands:
+        click.echo(f"  Starting [{name}]: {' '.join(cmd)}")
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        processes.append((name, proc))
+
+    click.echo("\nAll workers started. Waiting for completion...\n")
+
+    # Wait for all processes
+    for name, proc in processes:
+        stdout, stderr = proc.communicate()
+        if proc.returncode == 0:
+            # Extract last line with completion info
+            lines = stdout.strip().split('\n')
+            summary = lines[-1] if lines else "done"
+            click.echo(f"  [{name}] completed: {summary}")
+        else:
+            click.echo(f"  [{name}] failed (exit {proc.returncode})")
+            if stderr:
+                click.echo(f"    {stderr.split(chr(10))[-1]}")
+
+    click.echo("\nAll workers finished!")
 
 
 # ========== Task Commands ==========
